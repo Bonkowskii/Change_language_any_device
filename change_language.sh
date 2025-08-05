@@ -1,116 +1,118 @@
 #!/bin/bash
 
-DEVICE="$1"
-if [[ -z "$DEVICE" ]]; then
-  echo "❌ Użycie: $0 SERIAL_URZĄDZENIA"
+DEVICE_ID=$1
+TARGET_LANGUAGE="English"
+TARGET_REGION="United States"
+MAX_RETRIES=5
+UI_XML="/sdcard/ui_dump.xml"
+LOCAL_XML="ui_dump.xml"
+
+if [ -z "$DEVICE_ID" ]; then
+  echo "❌ Usage: $0 <DEVICE_ID>"
   exit 1
 fi
 
-# Wspólna funkcja do kliknięcia czegokolwiek po fragmencie tekstu
-find_partial_text_coordinates() {
-  local part="$1"
-  local xml="/sdcard/window_dump.xml"
-
-  >&2 echo "[*] Dumpuję aktualny widok UI..."
-  adb -s "$DEVICE" shell uiautomator dump "$xml" > /dev/null
-  adb -s "$DEVICE" pull "$xml" /tmp/window_dump.xml > /dev/null
-
-  bounds=$(xmllint --xpath "string(//node[contains(translate(@text, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '$(echo "$part" | tr '[:upper:]' '[:lower:]')') or contains(translate(@content-desc, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '$(echo "$part" | tr '[:upper:]' '[:lower:]')')]/@bounds)" /tmp/window_dump.xml 2>/dev/null)
-
-  if [[ -z "$bounds" ]]; then
-    return 1
-  fi
-
-  >&2 echo "[DEBUG] BOUNDS: $bounds"
-
-  x1=$(echo "$bounds" | cut -d']' -f1 | tr -d '[' | cut -d',' -f1)
-  y1=$(echo "$bounds" | cut -d']' -f1 | tr -d '[' | cut -d',' -f2)
-  x2=$(echo "$bounds" | cut -d']' -f2 | tr -d '[' | cut -d',' -f1)
-  y2=$(echo "$bounds" | cut -d']' -f2 | tr -d '[' | cut -d',' -f2)
-
-  x=$(( (x1 + x2) / 2 ))
-  y=$(( (y1 + y2) / 2 ))
-
-  echo "$x $y"
-  return 0
+function dump_ui() {
+  adb -s "$DEVICE_ID" shell uiautomator dump "$UI_XML" >/dev/null 2>&1
+  adb -s "$DEVICE_ID" pull "$UI_XML" "$LOCAL_XML" >/dev/null 2>&1
 }
 
-# Nowa funkcja: klik po resource-id
-tap_by_resource_id() {
-  local res_id="$1"
-  >&2 echo "[*] Szukam elementu z resource-id: $res_id"
+function find_coords_by_text_in_id() {
+  local id=$1
+  local keyword=$2
+  local xpath="//node[@resource-id='$id' and (contains(@text,'$keyword') or contains(@content-desc,'$keyword'))]"
+  local bounds
+  bounds=$(xmllint --xpath "$xpath/@bounds" "$LOCAL_XML" 2>/dev/null | sed 's/.*="\[\([0-9]*\),\([0-9]*\)\]\[\([0-9]*\),\([0-9]*\)\]".*/\1 \2 \3 \4/')
 
-  adb -s "$DEVICE" shell uiautomator dump /sdcard/dump.xml > /dev/null
-  adb -s "$DEVICE" pull /sdcard/dump.xml /tmp/dump.xml > /dev/null
-
-  bounds=$(xmllint --xpath "string(//*[@resource-id='$res_id']/@bounds)" /tmp/dump.xml 2>/dev/null)
-
-  if [[ -z "$bounds" ]]; then
-    echo "❌ Nie znaleziono przycisku z resource-id: $res_id"
-    return 1
+  if [ -z "$bounds" ]; then
+    echo ""
+    return
   fi
 
-  x1=$(echo "$bounds" | cut -d']' -f1 | tr -d '[' | cut -d',' -f1)
-  y1=$(echo "$bounds" | cut -d']' -f1 | tr -d '[' | cut -d',' -f2)
-  x2=$(echo "$bounds" | cut -d']' -f2 | tr -d '[' | cut -d',' -f1)
-  y2=$(echo "$bounds" | cut -d']' -f2 | tr -d '[' | cut -d',' -f2)
-
-  x=$(( (x1 + x2) / 2 ))
-  y=$(( (y1 + y2) / 2 ))
-
-  >&2 echo "[*] Klikam: ($x, $y)"
-  adb -s "$DEVICE" shell input tap "$x" "$y"
-  sleep 2
+  read x1 y1 x2 y2 <<< "$bounds"
+  cx=$(( (x1 + x2) / 2 ))
+  cy=$(( (y1 + y2) / 2 ))
+  echo "$cx $cy"
 }
 
-tap_on_text() {
-  local label="$1"
-  >&2 echo "[*] Szukam: $label"
-  coords=$(find_partial_text_coordinates "$label")
-  if [[ $? -eq 0 ]]; then
-    >&2 echo "[*] Klikam: $coords"
-    adb -s "$DEVICE" shell input tap $coords
-    sleep 2
-  else
-    echo "❌ Nie udało się kliknąć: $label"
-    exit 1
+function find_coords_by_id() {
+  local id=$1
+  local xpath="//node[@resource-id='$id']"
+  local bounds
+  bounds=$(xmllint --xpath "$xpath[1]/@bounds" "$LOCAL_XML" 2>/dev/null | sed 's/.*="\[\([0-9]*\),\([0-9]*\)\]\[\([0-9]*\),\([0-9]*\)\]".*/\1 \2 \3 \4/')
+
+  if [ -z "$bounds" ]; then
+    echo ""
+    return
   fi
+
+  read x1 y1 x2 y2 <<< "$bounds"
+  cx=$(( (x1 + x2) / 2 ))
+  cy=$(( (y1 + y2) / 2 ))
+  echo "$cx $cy"
 }
 
-drag_language_to_top() {
-  >&2 echo "[*] Przeciągam 'English' na górę listy..."
-
-  coords=$(find_partial_text_coordinates "English")
-  if [[ $? -ne 0 ]]; then
-    echo "❌ Nie znaleziono 'English' do przeciągnięcia"
-    exit 1
-  fi
-
-  x=$(echo "$coords" | cut -d' ' -f1)
-  y=$(echo "$coords" | cut -d' ' -f2)
-
-  y_target=$((y - 300))
-  if [[ $y_target -lt 200 ]]; then
-    y_target=200
-  fi
-
-  >&2 echo "[*] Swipe z ($x,$y) do ($x,$y_target)"
-  adb -s "$DEVICE" shell input swipe "$x" "$y" "$x" "$y_target" 300
-  sleep 2
+function tap_coords() {
+  local coords=$1
+  adb -s "$DEVICE_ID" shell input tap $coords
+  sleep 1
 }
 
-# ================ START ================
+function tap_by_id() {
+  local id=$1
+  local attempt=1
+  while [ "$attempt" -le "$MAX_RETRIES" ]; do
+    echo "[*] ($attempt/$MAX_RETRIES) Looking for ID: $id"
+    dump_ui
+    coords=$(find_coords_by_id "$id")
+    if [ -n "$coords" ]; then
+      echo "[*] Tapping at $coords (ID: $id)"
+      tap_coords "$coords"
+      return 0
+    fi
+    echo "[!] Not found yet, retrying..."
+    sleep 1
+    attempt=$((attempt + 1))
+  done
+  echo "❌ Could not tap: $id"
+  return 1
+}
 
-echo "[*] Otwieram ustawienia języka"
-adb -s "$DEVICE" shell am start -a android.settings.LOCALE_SETTINGS
+function tap_by_id_and_keyword() {
+  local id=$1
+  local keyword=$2
+  local attempt=1
+  while [ "$attempt" -le "$MAX_RETRIES" ]; do
+    echo "[*] ($attempt/$MAX_RETRIES) Looking for ID: $id with text/content: $keyword"
+    dump_ui
+    coords=$(find_coords_by_text_in_id "$id" "$keyword")
+    if [ -n "$coords" ]; then
+      echo "[*] Tapping at $coords (ID: $id, keyword: $keyword)"
+      tap_coords "$coords"
+      return 0
+    fi
+    echo "[!] Not found yet, retrying..."
+    sleep 1
+    attempt=$((attempt + 1))
+  done
+  echo "❌ Could not tap $keyword ($id)"
+  return 1
+}
+
+echo "[*] Launching language settings"
+adb -s "$DEVICE_ID" shell am start -a android.settings.LOCALE_SETTINGS
 sleep 2
 
-tap_on_text "Dodaj"
-tap_on_text "English"
-tap_on_text "United"
+echo "[*] Tapping 'Add language'"
+tap_by_id "com.android.settings:id/add_language" || exit 1
 
-drag_language_to_top
+echo "[*] Tapping desired language: $TARGET_LANGUAGE"
+tap_by_id_and_keyword "android:id/locale" "$TARGET_LANGUAGE" || exit 1
 
-tap_by_resource_id "android:id/button1"
+echo "[*] Tapping desired region: $TARGET_REGION"
+tap_by_id_and_keyword "android:id/locale" "$TARGET_REGION" || echo "[!] Region not found, maybe no region list"
 
-echo "✅ English (United States) ustawiony jako domyślny"
+echo "[*] Tapping 'Set as default' if shown"
+tap_by_id "android:id/button1" || echo "[!] No confirmation dialog"
+
+echo "✅ Language change should be complete"
