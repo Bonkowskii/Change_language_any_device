@@ -15,6 +15,7 @@ fi
 function dump_ui() {
   adb -s "$DEVICE_ID" shell uiautomator dump "$UI_XML" >/dev/null 2>&1
   adb -s "$DEVICE_ID" pull "$UI_XML" "$LOCAL_XML" >/dev/null 2>&1
+  adb -s "$DEVICE_ID" shell rm "$UI_XML" >/dev/null 2>&1
 }
 
 function find_coords_by_text_in_id() {
